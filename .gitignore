@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.vite/
+__pycache__/
+*.pyc
+.env
+.env.local
+.env.*.local
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# Local dev helpers, not needed in the repo
+make_docx.py
+capture_screens.py
+screenshots/
+pravaah_architecture.png
+Pravaah_TataYoungHackathon.docx

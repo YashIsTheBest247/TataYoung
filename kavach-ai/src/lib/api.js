@@ -30,6 +30,10 @@ export const api = {
   async listVulnerable() { return (await request('/api/vulnerable')).items; },
   async stats() { return request('/api/stats'); },
   async alerts(limit = 20) { return (await request(`/api/alerts?limit=${limit}`)).items; },
+  async shelters() { return (await request('/api/shelters')).items; },
+  async nearestShelter(lat, lng) {
+    return request(`/api/shelters/nearest?lat=${lat}&lng=${lng}`);
+  },
   async chat(message, history = []) {
     return request('/api/chat', { method: 'POST', body: JSON.stringify({ message, history }) });
   },

@@ -65,6 +65,28 @@ python capture_screens.py
 python make_docx.py
 ```
 
+## Database (Supabase)
+
+Pravaah stores zones, citizen reports, SOS pins, the vulnerable registry and
+the live feed in a Postgres database on Supabase. When `SUPABASE_URL` and
+`SUPABASE_KEY` are not set, the backend transparently falls back to an in
+memory store that resets on every restart. Set them for anything beyond a
+single live demo.
+
+### Setup
+
+1. Create a free Supabase project at https://supabase.com.
+2. Open **SQL Editor** in the Supabase dashboard, paste the contents of
+   [backend/supabase_schema.sql](backend/supabase_schema.sql) and run it. It
+   creates the five tables (`zones`, `reports`, `sos`, `vulnerable`, `alerts`),
+   adds indexes, enables RLS, and seeds the eight Mumbai monsoon hotspots.
+3. In **Settings > API**, copy two values:
+   - **Project URL** (looks like `https://xxxxxx.supabase.co`)
+   - **service_role** key (NOT the anon key). This key bypasses RLS and must
+     only live on the backend.
+4. On Render, set `SUPABASE_URL` and `SUPABASE_KEY` to those values. The
+   backend will log `data store: supabase (<url>)` at startup.
+
 ## Deployment
 
 ### Backend to Render
@@ -101,10 +123,16 @@ python make_docx.py
 | -------------------- | -------- | ---------------------------------------------------------- | ---------------------------------------------------- |
 | `GEMINI_API_KEY`     | yes      | https://aistudio.google.com/apikey                         | `AIzaSy...`                                          |
 | `GEMINI_MODEL`       | optional | Any valid Gemini model name                                | `gemini-2.0-flash` (default)                         |
+| `SUPABASE_URL`       | yes      | Supabase Settings > API > Project URL                      | `https://xxxxxx.supabase.co`                         |
+| `SUPABASE_KEY`       | yes      | Supabase Settings > API > service_role key                 | `eyJhbGciOi...` (long JWT)                           |
 | `CORS_ORIGINS`       | yes      | The Vercel URL, comma separated for previews               | `https://pravaah.vercel.app`                         |
 | `SELF_PING_URL`      | yes      | Your own Render service URL plus `/api/health`             | `https://pravaah-api.onrender.com/api/health`        |
 | `SELF_PING_INTERVAL` | optional | Seconds between pings. Default 12.                         | `12`                                                 |
 | `PYTHON_VERSION`     | optional | Pin a Python version. Already set in render.yaml.          | `3.12.4`                                             |
+
+If `SUPABASE_URL` or `SUPABASE_KEY` is empty, the backend falls back to an in
+memory store that resets on each restart. The service still works but no data
+survives a redeploy.
 
 The self ping task runs inside the FastAPI lifespan hook. Every
 `SELF_PING_INTERVAL` seconds it hits `SELF_PING_URL` with a small `GET`, which

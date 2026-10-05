@@ -4,7 +4,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
   Radio, Siren, Users, Route as RouteIcon, Loader2, LocateFixed, AlertTriangle,
-  Phone, Satellite, Flame,
+  Phone, Satellite, Flame, Home,
 } from 'lucide-react';
 import NavBar from '../components/NavBar.jsx';
 import { api } from '../lib/api.js';
@@ -36,14 +36,23 @@ const MOSS_DOT = dotIcon('#3d8c69');
 const SOS_DOT = dotIcon('#c1372b', true);
 const PIN_DOT = dotIcon('#d9951f');
 
+const SHELTER_ICON = L.divIcon({
+  className: '',
+  html: `<div style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;background:#2d4870;border:2px solid #fff;border-radius:6px;box-shadow:0 2px 6px rgba(0,0,0,0.3);color:#fff;font-weight:700;font-size:12px;font-family:Inter,sans-serif;">S</div>`,
+  iconSize: [24, 24],
+  iconAnchor: [12, 12],
+});
+
 export default function MapDashboard() {
   const [zones, setZones] = useState([]);
   const [reports, setReports] = useState([]);
   const [sos, setSos] = useState([]);
   const [vulnerable, setVulnerable] = useState([]);
+  const [shelters, setShelters] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [stats, setStats] = useState(null);
   const [showVuln, setShowVuln] = useState(true);
+  const [showShelters, setShowShelters] = useState(true);
   const [routeState, setRouteState] = useState({
     origin: [19.1197, 72.8468],
     dest: [19.0176, 72.8562],
@@ -55,10 +64,12 @@ export default function MapDashboard() {
 
   const refresh = async () => {
     try {
-      const [z, r, s, v, a, st] = await Promise.all([
-        api.zones(), api.reports(30), api.listSos(), api.listVulnerable(), api.alerts(20), api.stats(),
+      const [z, r, s, v, sh, a, st] = await Promise.all([
+        api.zones(), api.reports(30), api.listSos(), api.listVulnerable(),
+        api.shelters(), api.alerts(20), api.stats(),
       ]);
-      setZones(z); setReports(r); setSos(s); setVulnerable(v); setAlerts(a); setStats(st);
+      setZones(z); setReports(r); setSos(s); setVulnerable(v);
+      setShelters(sh); setAlerts(a); setStats(st);
     } catch (e) {
       console.error(e);
     }
@@ -183,6 +194,25 @@ export default function MapDashboard() {
                   </Marker>
                 ))}
 
+                {showShelters && shelters.map((sh) => (
+                  <Marker key={sh.id} position={[sh.lat, sh.lng]} icon={SHELTER_ICON}>
+                    <Popup>
+                      <div className="min-w-[240px]">
+                        <div className="text-xs uppercase tracking-widest text-deepwater-600">Relief shelter</div>
+                        <div className="mt-1 text-sm font-semibold">{sh.name}</div>
+                        <div className="mt-1 text-xs text-ink-600">{sh.address}</div>
+                        <div className="mt-2 flex items-center gap-3 text-xs">
+                          <span><span className="font-semibold">{sh.capacity}</span> capacity</span>
+                          {sh.contact && <span className="font-mono text-[11px]">{sh.contact}</span>}
+                        </div>
+                        {sh.amenities && (
+                          <div className="mt-1 text-[11px] text-ink-600">Amenities: {sh.amenities}</div>
+                        )}
+                      </div>
+                    </Popup>
+                  </Marker>
+                ))}
+
                 <Marker position={routeState.origin} icon={dotIcon('#d9951f')}>
                   <Popup>Origin</Popup>
                 </Marker>
@@ -205,7 +235,10 @@ export default function MapDashboard() {
                 )}
               </MapContainer>
 
-              <Legend showVuln={showVuln} setShowVuln={setShowVuln} />
+              <Legend
+                showVuln={showVuln} setShowVuln={setShowVuln}
+                showShelters={showShelters} setShowShelters={setShowShelters}
+              />
             </div>
           </section>
 
@@ -237,6 +270,7 @@ function PageHead({ stats }) {
         <StatPill k="Reports" v={stats?.reports_total ?? '–'} tone="ink" Icon={Radio} />
         <StatPill k="SOS open" v={stats?.sos_open ?? '–'} tone="rust" Icon={Siren} />
         <StatPill k="Vulnerable" v={stats?.vulnerable_registered ?? '–'} tone="moss" Icon={Users} />
+        <StatPill k="Shelters" v={stats?.shelters_total ?? '–'} tone="water" Icon={Home} />
       </div>
     </div>
   );
@@ -248,6 +282,7 @@ function StatPill({ k, v, tone, Icon }) {
     amber: 'border-amber2-500/30 bg-amber2-500/10 text-amber2-700',
     moss: 'border-moss-500/30 bg-moss-500/10 text-moss-600',
     ink: 'border-ink-100 bg-white text-ink-700',
+    water: 'border-deepwater-500/30 bg-deepwater-500/10 text-deepwater-600',
   }[tone];
   return (
     <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${palette}`}>
@@ -260,7 +295,7 @@ function StatPill({ k, v, tone, Icon }) {
   );
 }
 
-function Legend({ showVuln, setShowVuln }) {
+function Legend({ showVuln, setShowVuln, showShelters, setShowShelters }) {
   return (
     <div className="absolute left-4 top-4 z-[500] space-y-1 rounded-2xl border border-ink-100 bg-white/95 p-3 text-[11px] text-ink-800 backdrop-blur shadow-card">
       <div className="mb-1 text-[10px] uppercase tracking-widest text-ink-400">Legend</div>
@@ -268,6 +303,10 @@ function Legend({ showVuln, setShowVuln }) {
       <LegendRow color="#d9951f" label="Medium risk zone" />
       <LegendRow color="#3d8c69" label="Low risk / safe" />
       <LegendRow color="#d9951f" label="Vulnerable person" />
+      <div className="flex items-center gap-2">
+        <span className="flex h-3 w-3 items-center justify-center rounded-sm bg-deepwater-500 text-[8px] font-bold text-white">S</span>
+        <span>Relief shelter</span>
+      </div>
       <label className="mt-2 flex items-center gap-2 text-ink-600">
         <input
           type="checkbox"
@@ -276,6 +315,15 @@ function Legend({ showVuln, setShowVuln }) {
           className="accent-amber2-500"
         />
         Show vulnerable layer
+      </label>
+      <label className="flex items-center gap-2 text-ink-600">
+        <input
+          type="checkbox"
+          checked={showShelters}
+          onChange={(e) => setShowShelters(e.target.checked)}
+          className="accent-amber2-500"
+        />
+        Show shelters
       </label>
     </div>
   );

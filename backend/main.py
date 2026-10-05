@@ -37,7 +37,6 @@ import math
 import os
 import re
 import uuid
-from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
@@ -48,7 +47,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from db import build_store
+
 load_dotenv()
+
+store = build_store()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
@@ -116,50 +119,11 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# In memory state. Replace with Postgres + PostGIS in production.
+# Storage. See db.py for the Supabase + in memory implementations.
 # ---------------------------------------------------------------------------
 
-ALERTS: deque = deque(maxlen=100)
-
-
 def _alert(kind: str, text: str, extra: dict | None = None) -> None:
-    ALERTS.appendleft({
-        "id": uuid.uuid4().hex[:8].upper(),
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "kind": kind,
-        "text": text,
-        **(extra or {}),
-    })
-
-
-# Seed data for Mumbai during a monsoon day. Coordinates are approximate.
-# Each zone is a circle: lat, lng, radius in metres, severity, source.
-SEED_ZONES: list[dict] = [
-    {"id": "Z-ANDH-01", "lat": 19.1197, "lng": 72.8468, "radius_m": 650,
-     "severity": "high", "name": "Andheri subway", "source": "satellite+reports"},
-    {"id": "Z-KURL-01", "lat": 19.0728, "lng": 72.8826, "radius_m": 900,
-     "severity": "high", "name": "Kurla LBS stretch", "source": "satellite"},
-    {"id": "Z-SION-01", "lat": 19.0472, "lng": 72.8632, "radius_m": 500,
-     "severity": "medium", "name": "Sion circle", "source": "reports"},
-    {"id": "Z-DADR-01", "lat": 19.0176, "lng": 72.8562, "radius_m": 420,
-     "severity": "medium", "name": "Dadar TT", "source": "reports"},
-    {"id": "Z-HIND-01", "lat": 19.0459, "lng": 72.8395, "radius_m": 700,
-     "severity": "high", "name": "Hindmata junction", "source": "satellite+reports"},
-    {"id": "Z-BAND-01", "lat": 19.0596, "lng": 72.8295, "radius_m": 350,
-     "severity": "medium", "name": "Bandra reclamation", "source": "reports"},
-    {"id": "Z-WORL-01", "lat": 18.9930, "lng": 72.8176, "radius_m": 400,
-     "severity": "low", "name": "Worli sea face", "source": "satellite"},
-    {"id": "Z-POWA-01", "lat": 19.1176, "lng": 72.9060, "radius_m": 800,
-     "severity": "medium", "name": "Powai lake road", "source": "reports"},
-]
-
-ZONES: dict[str, dict] = {z["id"]: dict(z) for z in SEED_ZONES}
-REPORTS: deque = deque(maxlen=500)
-SOS: dict[str, dict] = {}
-VULNERABLE: dict[str, dict] = {}
-
-for z in SEED_ZONES:
-    _alert("zone", f"{z['name']} marked {z['severity']} risk", {"zone_id": z["id"]})
+    store.add_alert(kind, text, extra)
 
 
 # ---------------------------------------------------------------------------
@@ -255,10 +219,10 @@ def point_in_zone(lat: float, lng: float, zone: dict) -> bool:
     return haversine(lat, lng, zone["lat"], zone["lng"]) <= zone["radius_m"]
 
 
-def nearest_zone(lat: float, lng: float) -> tuple[dict | None, float]:
+def nearest_zone(zones: list[dict], lat: float, lng: float) -> tuple[dict | None, float]:
     best = None
     best_d = float("inf")
-    for z in ZONES.values():
+    for z in zones:
         d = haversine(lat, lng, z["lat"], z["lng"]) - z["radius_m"]
         if d < best_d:
             best_d = d
@@ -387,16 +351,23 @@ def gemini_report(text: str, depth_cm: int | None, photo_b64: str | None) -> dic
 
 def ingest_zone_from_report(rep: dict) -> None:
     """Create or strengthen a zone near a citizen report."""
-    near, dist = nearest_zone(rep["lat"], rep["lng"])
+    zones = store.list_zones()
+    near, dist = nearest_zone(zones, rep["lat"], rep["lng"])
     if near and dist < 400:
         order = {"low": 0, "medium": 1, "high": 2}
         if order[rep["severity"]] > order[near["severity"]]:
-            near["severity"] = rep["severity"]
-            near["source"] = (near.get("source", "") + "+reports").strip("+")
-            _alert("zone_upgrade", f"{near['name']} upgraded to {near['severity']} after new report", {"zone_id": near["id"]})
+            updated = {
+                **near,
+                "severity": rep["severity"],
+                "source": (near.get("source", "") + "+reports").strip("+"),
+            }
+            store.upsert_zone(updated)
+            _alert("zone_upgrade",
+                   f"{near['name']} upgraded to {rep['severity']} after new report",
+                   {"zone_id": near["id"]})
         return
-    new_id = f"Z-RPT-{len(ZONES) + 1:03d}"
-    ZONES[new_id] = {
+    new_id = f"Z-RPT-{len(zones) + 1:03d}"
+    store.upsert_zone({
         "id": new_id,
         "lat": rep["lat"],
         "lng": rep["lng"],
@@ -404,8 +375,10 @@ def ingest_zone_from_report(rep: dict) -> None:
         "severity": rep["severity"],
         "name": "Reported flooding",
         "source": "reports",
-    }
-    _alert("zone_new", f"New flooded area reported near {rep['lat']:.3f}, {rep['lng']:.3f}", {"zone_id": new_id})
+    })
+    _alert("zone_new",
+           f"New flooded area reported near {rep['lat']:.3f}, {rep['lng']:.3f}",
+           {"zone_id": new_id})
 
 
 # ---------------------------------------------------------------------------
@@ -430,9 +403,9 @@ def segment_crosses_zone(a_lat: float, a_lng: float, b_lat: float, b_lng: float,
     return False
 
 
-def crossed_zones(path: list[tuple[float, float]], severities: set[str]) -> list[dict]:
+def crossed_zones(zones: list[dict], path: list[tuple[float, float]], severities: set[str]) -> list[dict]:
     hits = []
-    for z in ZONES.values():
+    for z in zones:
         if z["severity"] not in severities:
             continue
         if any(segment_crosses_zone(path[i][0], path[i][1], path[i + 1][0], path[i + 1][1], z)
@@ -446,12 +419,13 @@ def plan_route(origin: tuple[float, float], dest: tuple[float, float], vehicle: 
     if vehicle in ("pedestrian", "car"):
         avoid.add("medium")
 
+    zones = store.list_zones()
     # Start with a 2 point straight path, then route around zones with up to
     # three waypoints perpendicular to the leg.
     path = [origin, dest]
     avoided_names: list[str] = []
     for _ in range(6):
-        hits = crossed_zones(path, avoid)
+        hits = crossed_zones(zones, path, avoid)
         if not hits:
             break
         z = hits[0]
@@ -476,7 +450,7 @@ def plan_route(origin: tuple[float, float], dest: tuple[float, float], vehicle: 
             meters_e=side * px * offset_m,
         )
         path = [origin, (wp_lat, wp_lng), dest]
-        if len(crossed_zones(path, avoid)) >= len(hits):
+        if len(crossed_zones(zones, path, avoid)) >= len(hits):
             # Could not improve. Try opposite side.
             wp_lat, wp_lng = _offset(
                 mid_lat, mid_lng,
@@ -485,7 +459,7 @@ def plan_route(origin: tuple[float, float], dest: tuple[float, float], vehicle: 
             )
             path = [origin, (wp_lat, wp_lng), dest]
 
-    final_hits = crossed_zones(path, avoid)
+    final_hits = crossed_zones(zones, path, avoid)
     status = "safe" if not final_hits else ("safest_available" if len(final_hits) < 2 else "blocked")
 
     distance_m = sum(
@@ -523,22 +497,23 @@ def root():
         "gemini_enabled": _client is not None,
         "model": GEMINI_MODEL if _client else None,
         "city": "Mumbai",
+        "store": store.name,
     }
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": datetime.now(timezone.utc).isoformat()}
+    return {"ok": True, "ts": datetime.now(timezone.utc).isoformat(), "store": store.name}
 
 
 @app.get("/api/zones")
 def list_zones():
-    return {"items": list(ZONES.values())}
+    return {"items": store.list_zones()}
 
 
 @app.get("/api/reports")
 def list_reports(limit: int = 30):
-    return {"items": list(REPORTS)[:limit]}
+    return {"items": store.list_reports(limit)}
 
 
 @app.post("/api/reports", response_model=ReportOut)
@@ -555,10 +530,12 @@ def create_report(req: ReportIn):
         "reporter_name": req.reporter_name,
         **analysis,
     }
-    REPORTS.appendleft(rec)
-    ingest_zone_from_report(rec)
-    _alert("report", f"New citizen report at {req.lat:.3f}, {req.lng:.3f}, severity {rec['severity']}", {"report_id": rec["id"]})
-    return rec
+    saved = store.add_report(rec)
+    ingest_zone_from_report(saved)
+    _alert("report",
+           f"New citizen report at {req.lat:.3f}, {req.lng:.3f}, severity {saved['severity']}",
+           {"report_id": saved["id"]})
+    return saved
 
 
 @app.post("/api/route", response_model=RouteResponse)
@@ -575,57 +552,80 @@ def route(req: RouteRequest):
 @app.post("/api/sos")
 def create_sos(req: SosIn):
     sid = uuid.uuid4().hex[:8].upper()
-    SOS[sid] = {
+    saved = store.add_sos({
         "id": sid,
-        "created_at": datetime.now(timezone.utc).isoformat(),
         **req.model_dump(),
         "status": "open",
-    }
+    })
     _alert("sos", f"SOS from {req.person_name}, condition: {req.condition}", {"sos_id": sid})
-    return SOS[sid]
+    return saved
 
 
 @app.get("/api/sos")
 def list_sos():
-    return {"items": list(SOS.values())}
+    return {"items": store.list_sos()}
 
 
 @app.post("/api/vulnerable")
 def register_vulnerable(req: VulnerableIn):
     vid = uuid.uuid4().hex[:8].upper()
-    VULNERABLE[vid] = {
-        "id": vid,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        **req.model_dump(),
-    }
+    saved = store.add_vulnerable({"id": vid, **req.model_dump()})
     _alert("vulnerable", f"Registered {req.person_name}, {req.condition}", {"vulnerable_id": vid})
-    return VULNERABLE[vid]
+    return saved
 
 
 @app.get("/api/vulnerable")
 def list_vulnerable():
-    return {"items": list(VULNERABLE.values())}
+    return {"items": store.list_vulnerable()}
 
 
 @app.get("/api/stats")
 def stats():
+    zones = store.list_zones()
+    reports = store.list_reports(500)
+    sos = store.list_sos()
+    vulnerable = store.list_vulnerable()
+    shelters = store.list_shelters()
     severities = {"low": 0, "medium": 0, "high": 0}
-    for z in ZONES.values():
+    for z in zones:
         severities[z["severity"]] = severities.get(z["severity"], 0) + 1
     return {
-        "zones_total": len(ZONES),
+        "zones_total": len(zones),
         "zones_high": severities["high"],
         "zones_medium": severities["medium"],
         "zones_low": severities["low"],
-        "reports_total": len(REPORTS),
-        "sos_open": sum(1 for s in SOS.values() if s["status"] == "open"),
-        "vulnerable_registered": len(VULNERABLE),
+        "reports_total": len(reports),
+        "sos_open": sum(1 for s in sos if s.get("status") == "open"),
+        "vulnerable_registered": len(vulnerable),
+        "shelters_total": len(shelters),
+        "shelters_capacity": sum(int(s.get("capacity") or 0) for s in shelters),
+        "store": store.name,
     }
 
 
 @app.get("/api/alerts")
 def list_alerts(limit: int = 30):
-    return {"items": list(ALERTS)[:limit]}
+    return {"items": store.list_alerts(limit)}
+
+
+@app.get("/api/shelters")
+def list_shelters():
+    return {"items": store.list_shelters()}
+
+
+@app.get("/api/shelters/nearest")
+def nearest_shelter(lat: float, lng: float):
+    shelters = store.list_shelters()
+    best: dict | None = None
+    best_d = float("inf")
+    for s in shelters:
+        d = haversine(lat, lng, s["lat"], s["lng"])
+        if d < best_d:
+            best_d = d
+            best = s
+    if not best:
+        raise HTTPException(status_code=404, detail="no shelters registered")
+    return {"shelter": best, "distance_km": round(best_d / 1000.0, 2)}
 
 
 # ---------------------------------------------------------------------------
